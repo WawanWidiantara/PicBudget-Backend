@@ -26,12 +26,13 @@ SECRET_KEY = "django-insecure-#p49wk5$a#gpso@gz-i733b@cfggwco%xpa5g+8xpaip8+0-y2
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["modern-krill-fair.ngrok-free.app", "127.0.0.1"]
 
 
 # Application definition
 
 INSTALLED_APPS = [
+    "rest_framework_simplejwt.token_blacklist",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -44,6 +45,10 @@ INSTALLED_APPS = [
 ]
 
 AUTH_USER_MODEL = "api.User"
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://modern-krill-fair.ngrok-free.app",
+]
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (

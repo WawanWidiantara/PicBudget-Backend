@@ -2,8 +2,6 @@ from django.urls import path
 
 from .views import (
     UserCreateView,
-    WalletListCreateView,
-    WalletDetailView,
     TransactionListCreateView,
     TransactionDetailView,
     ExtractTextAPIView,
@@ -13,16 +11,26 @@ from .views import (
     WalletListView,
     TotalAmountView,
     TotalTransactionsView,
+    LogoutView,
+    UserDetailView,
+    UpdateWalletBalanceView,
+    CreateWalletAPIView,
+    ValidateEmailPasswordView,
 )
 
 urlpatterns = [
+    path("user/", UserDetailView.as_view(), name="user_detail"),
     path("users/", UserCreateView.as_view(), name="user-create"),
-    path("wallets/", WalletListCreateView.as_view(), name="wallet-list-create"),
-    path("wallets/<int:pk>/", WalletDetailView.as_view(), name="wallet-detail"),
-    path("users-wallets/", WalletListView.as_view(), name="wallet_list"),
-    path("total_amount/", TotalAmountView.as_view(), name="total_amount"),
+    path("create-wallet/", CreateWalletAPIView.as_view(), name="create-wallet"),
+    path("wallets/", WalletListView.as_view(), name="wallet_list"),
     path(
-        "total_transactions/",
+        "update-wallet-balance/<int:wallet_id>/",
+        UpdateWalletBalanceView.as_view(),
+        name="update-wallet-balance",
+    ),
+    path("total-amount/", TotalAmountView.as_view(), name="total_amount"),
+    path(
+        "total-transactions/",
         TotalTransactionsView.as_view(),
         name="total_transactions",
     ),
@@ -38,10 +46,16 @@ urlpatterns = [
     ),
     path("extract/", ExtractTextAPIView.as_view(), name="extract-text"),
     path(
-        "create_transaction/",
+        "create-transaction/",
         CreateTransactionAPIView.as_view(),
         name="create-transaction",
     ),
     path("register/", RegisterView.as_view(), name="register"),
+    path(
+        "validate-email-password/",
+        ValidateEmailPasswordView.as_view(),
+        name="validate-email-password",
+    ),
     path("login/", LoginView.as_view(), name="login"),
+    path("logout/", LogoutView.as_view(), name="logout"),
 ]

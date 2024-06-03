@@ -1,4 +1,5 @@
 import os
+import time
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -8,8 +9,8 @@ from .serializers import (
     WalletSerializer,
     TransactionSerializer,
     UserSerializer,
-    TransactionItemSerializer,
     RegisterSerializer,
+    CustomTokenObtainPairSerializer,
 )
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -26,8 +27,21 @@ from .processors.text_extractor import TextExtractor
 from .processors.receipt_processor import ReceiptProcessor
 from datetime import datetime
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+from urllib.parse import urlparse
+from django.core.files import File
+from django.contrib.auth.password_validation import validate_password
+from django.core.validators import validate_email
+from django.core.exceptions import ValidationError
+
+import logging
+from django.utils.timezone import now
 
 User = get_user_model()
+
+logger = logging.getLogger(__name__)
 
 
 class UserCreateView(generics.CreateAPIView):
@@ -35,13 +49,73 @@ class UserCreateView(generics.CreateAPIView):
     serializer_class = UserSerializer
 
 
-class WalletListCreateView(generics.ListCreateAPIView):
-    queryset = Wallet.objects.all()
-    serializer_class = WalletSerializer
+class UserDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        data = {
+            "user_id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "dob": user.dob,
+            "gender": user.gender,
+            "phone_number": user.phone_number,
+        }
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class CreateWalletAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+    def post(self, request, *args, **kwargs):
+        wallet_name = request.data.get("wallet_name")
+        balance = request.data.get("balance", 0)
+
+        if not wallet_name:
+            return Response(
+                {"error": "Wallet name is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        wallet = Wallet.objects.create(
+            user=request.user, wallet_name=wallet_name, balance=balance
+        )
+
+        serializer = WalletSerializer(wallet, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class UpdateWalletBalanceView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def patch(self, request, wallet_id, *args, **kwargs):
+        try:
+            # Get the specified wallet for the authenticated user
+            wallet = Wallet.objects.get(id=wallet_id, user=request.user)
+
+            # Get the new balance from the request data
+            new_balance = request.data.get("balance")
+            if new_balance is None:
+                return Response(
+                    {"error": "No balance provided"}, status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Update the balance
+            wallet.balance = new_balance
+            wallet.save()
+
+            # Return the updated wallet data
+            serializer = WalletSerializer(wallet, context={"request": request})
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Wallet.DoesNotExist:
+            return Response(
+                {"error": "Wallet not found or does not belong to the user"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class WalletListView(APIView):
@@ -102,7 +176,9 @@ class TransactionListCreateView(generics.ListCreateAPIView):
         serializer.save()
 
     def get_queryset(self):
-        return self.queryset.filter(wallet__user=self.request.user)
+        return self.queryset.filter(wallet__user=self.request.user).order_by(
+            "-created_at"
+        )
 
 
 class TransactionDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -127,7 +203,8 @@ class ExtractTextAPIView(APIView):
 
         try:
             # Save the uploaded file temporarily
-            file_name = default_storage.save(f"receipts/temp_{file.name}", file)
+            format_fname = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{request.user.id}.{file.name.split('.')[-1]}"
+            file_name = default_storage.save(f"receipts/{format_fname}", file)
             file_url = default_storage.url(file_name)
 
             # Read the file content for processing
@@ -152,20 +229,32 @@ class ExtractTextAPIView(APIView):
             image_for_processing = original_image.copy()
 
             # Process the image
+            print("Processing the image...")  # Debug print
+            start_time = time.time()
             page_extractor = PageExtractor(
                 image_array=image_for_processing, remove_background="n"
             )
             preprocessed_image = page_extractor.preprocess_image()
+            print(f"Processing time: {time.time() - start_time} seconds")  # Debug print
 
             preprocessed_image = cv2.cvtColor(preprocessed_image, cv2.COLOR_GRAY2BGR)
 
+            start_time = time.time()
+            print("Extracting text from the image...")  # Debug print
             text_extractor = TextExtractor(preprocessed_image)
             extracted_text = text_extractor.extracted_text
+            print(f"Extraction time: {time.time() - start_time} seconds")  # Debug print
 
-            model_path = "api/ner_model_v3"
+            print("Model implementation...")  # Debug print
+            start_time = time.time()
+            model_path = "api/picbudget_bilstm/"
             processor = ReceiptProcessor(model_path)
             result = processor.process_receipt(extracted_text)
-            result["receipt_image_url"] = file_url
+            result["receipt_image_url"] = request.build_absolute_uri(file_url)
+            print("Model implementation done...")  # Debug print
+            print(
+                f"Model implementation time: {time.time() - start_time} seconds"
+            )  # Debug print
 
             # Return the extracted result for user review
             return Response(result, status=status.HTTP_200_OK)
@@ -186,9 +275,6 @@ class CreateTransactionAPIView(APIView):
                     {"error": "No wallet provided"}, status=status.HTTP_400_BAD_REQUEST
                 )
 
-            wallet = Wallet.objects.get(id=wallet_id)
-
-            # Ensure the wallet belongs to the authenticated user
             try:
                 wallet = Wallet.objects.get(id=wallet_id, user=request.user)
             except Wallet.DoesNotExist:
@@ -199,6 +285,12 @@ class CreateTransactionAPIView(APIView):
 
             # Extract transaction details from the request
             ocr_data = request.data.get("ocr_data")
+            if not ocr_data:
+                return Response(
+                    {"error": "No OCR data provided"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             amount = ocr_data.get("total")
             location = ocr_data.get("address")
             date = ocr_data.get("date")
@@ -211,18 +303,35 @@ class CreateTransactionAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Create a transaction with the confirmed data
-            transaction = Transaction(
-                wallet=wallet,
-                amount=amount,
-                location=location,
-                date=datetime.strptime(date, "%d/%m/%Y"),
-                receipt_image=receipt_image_url,
-                ocr_data=ocr_data,
-            )
-            transaction.save()
+            # Download the image file from the URL
+            parsed_url = urlparse(receipt_image_url)
 
-            wallet.balance -= transaction.amount
+            # Create a temporary file to save the downloaded image
+            image_filename = os.path.basename(parsed_url.path)
+            temp_image_path = os.path.join(
+                settings.MEDIA_ROOT, "receipts", image_filename
+            )
+
+            # Create a transaction with the confirmed data
+            with open(temp_image_path, "rb") as f:
+                transaction = Transaction(
+                    wallet=wallet,
+                    amount=amount,
+                    location=location,
+                    date=datetime.strptime(date, "%d/%m/%Y"),
+                    receipt_image=File(f, name=image_filename),
+                    ocr_data=ocr_data,
+                )
+                transaction.save()
+
+            total_transactions = (
+                Transaction.objects.filter(wallet__user=request.user).aggregate(
+                    total=models.Sum("amount")
+                )["total"]
+                or 0
+            )
+
+            wallet.balance -= total_transactions
             wallet.save()
 
             # Create TransactionItem entries
@@ -233,16 +342,14 @@ class CreateTransactionAPIView(APIView):
                     item_price=item["price"],
                 )
 
-            # Delete the temporary image file after transaction is created
-            image_path = os.path.join(
-                settings.MEDIA_ROOT, receipt_image_url.lstrip("/")
-            )
-            if os.path.exists(image_path):
-                os.remove(image_path)
+            # Remove the temporary image file
+            os.remove(temp_image_path)
 
-            return Response(
-                TransactionSerializer(transaction).data, status=status.HTTP_201_CREATED
+            # Return the transaction data with the full URL for the receipt_image
+            serializer = TransactionSerializer(
+                transaction, context={"request": request}
             )
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
         except Exception as e:
             return Response(
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -253,23 +360,100 @@ class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
 
-class LoginView(APIView):
-    permission_classes = (permissions.AllowAny,)
+        # Create a wallet for the user
+        balance = serializer.validated_data.get("balance", 0)
+        wallet = Wallet.objects.create(user=user, wallet_name="main", balance=balance)
 
+        headers = self.get_success_headers(serializer.data)
+        response_data = serializer.data
+        response_data["wallet_id"] = wallet.id
+
+        return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
+
+
+class ValidateEmailPasswordView(APIView):
     def post(self, request, *args, **kwargs):
         email = request.data.get("email")
         password = request.data.get("password")
-        user = User.objects.filter(email=email).first()
 
-        if user and user.check_password(password):
-            refresh = RefreshToken.for_user(user)
+        if not email:
             return Response(
-                {
-                    "refresh": str(refresh),
-                    "access": str(refresh.access_token),
-                }
+                {"error": "Email is required"}, status=status.HTTP_400_BAD_REQUEST
             )
+
+        # Validate email format
+        try:
+            validate_email(email)
+        except ValidationError:
+            return Response(
+                {"error": "Invalid email format"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if User.objects.filter(email=email).exists():
+            return Response(
+                {"error": "Email already exists"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not password:
+            return Response(
+                {"error": "Password is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            validate_password(password)
+        except ValidationError as e:
+            return Response({"error": e.messages}, status=status.HTTP_400_BAD_REQUEST)
+
         return Response(
-            {"error": "Invalid credentials"}, status=status.HTTP_400_BAD_REQUEST
+            {"message": "Email and password are valid"}, status=status.HTTP_200_OK
         )
+
+
+class LoginView(TokenObtainPairView):
+    serializer_class = CustomTokenObtainPairSerializer
+
+
+class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            refresh_token = request.data.get("refresh_token")
+            if not refresh_token:
+                print("Refresh token not provided")  # Debug print
+                return Response(
+                    {"error": "Refresh token is required"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            print(f"Received refresh token: {refresh_token}")  # Debug print
+
+            token = RefreshToken(refresh_token)
+            print(f"Token before blacklisting: {token}")  # Debug print
+            token.blacklist()
+            print("Token blacklisted successfully")  # Debug print
+
+            return Response(status=status.HTTP_205_RESET_CONTENT)
+        except TokenError as e:
+            print(f"TokenError: {e}")  # Debug print
+            return Response(
+                {"error": "Invalid token", "details": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except KeyError as e:
+            print(f"KeyError: {e}")  # Debug print
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except AttributeError as e:
+            print(f"AttributeError: {e}")  # Debug print
+            return Response(
+                {"error": "Invalid token", "details": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            print(f"Exception: {e}")  # Debug print
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)

@@ -50,10 +50,11 @@ class Transaction(models.Model):
         Wallet, on_delete=models.CASCADE, related_name="transactions"
     )
     amount = models.DecimalField(max_digits=15, decimal_places=2)
-    location = models.CharField(max_length=255)
-    date = models.DateTimeField()
-    receipt_image = models.ImageField(upload_to="receipts/", null=True, blank=True)
+    location = models.CharField(max_length=255, null=True, blank=True)
+    date = models.DateTimeField(null=True, blank=True)
+    receipt_image = models.ImageField(upload_to="receipts/", blank=True, null=True)
     ocr_data = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return (

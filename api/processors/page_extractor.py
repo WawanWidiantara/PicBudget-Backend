@@ -1,39 +1,41 @@
 import numpy as np
 import cv2
 from rembg import remove
+from matplotlib import pyplot as plt
 
 
 class PageExtractor:
-    def __init__(self, image_path=None, image_array=None, remove_background="n"):
+    def __init__(
+        self,
+        image_path=None,
+        image_array=None,
+        remove_background="n",
+    ):
+        self.image = self._load_image(image_path, image_array)
+        self.remove_background = remove_background
+        self._preprocessed_image = self._preprocess_image()
+
+    def _load_image(self, image_path, image_array):
         if image_path:
-            self.image_path = image_path
-            self.image = cv2.imread(image_path)
+            return cv2.imread(image_path)
         elif image_array is not None:
-            self.image = image_array
+            return image_array
         else:
             raise ValueError("Either image_path or image_array must be provided")
 
-        self.remove_background = remove_background
-        self._preprocessed_image, aspect_ratio = self._resize_image(self.image.copy())
-
+    def _preprocess_image(self):
+        image, aspect_ratio = self._resize_image(self.image.copy())
         if self.remove_background == "y":
-            self._preprocessed_image = remove(self._preprocessed_image)
+            image = remove(image)
         else:
-            self._preprocessed_image = self._apply_grab_cut(self._preprocessed_image)
-            self._preprocessed_image = self._apply_morphology(self._preprocessed_image)
-
-        self._preprocessed_image = self._convert_to_gray(self._preprocessed_image)
-        self._preprocessed_image = self._apply_dilation(self._preprocessed_image)
-        self._preprocessed_image = self._apply_blur(self._preprocessed_image)
-        self._preprocessed_image = self._apply_erosion(self._preprocessed_image)
-        self._preprocessed_image = self._apply_canny_edge_detection(
-            self._preprocessed_image
-        )
-        self._preprocessed_image = self._cut_image_to_contours(
-            self.image, self._preprocessed_image, aspect_ratio
-        )
-        self._preprocessed_image = self._apply_denoising(self._preprocessed_image)
-        self._preprocessed_image = self._binarize_image(self._preprocessed_image)
+            image = self._apply_grab_cut(image)
+            image = self._apply_morphology(image)
+        image = self._convert_to_gray(image)
+        image = self._apply_canny_edge_detection(image)
+        image = self._cut_image_to_contours(self.image, image, aspect_ratio)
+        image = self._apply_denoising_alternative(image)
+        image = self._binarize_image(image)
+        return image
 
     def _resize_image(self, image, ratio=300):
         aspect_ratio = ratio / image.shape[1]
@@ -65,21 +67,10 @@ class PageExtractor:
 
     def _apply_morphology(self, image):
         kernel = np.ones((5, 5), np.uint8)
-        return cv2.morphologyEx(image, cv2.MORPH_CLOSE, kernel, iterations=3)
+        return cv2.morphologyEx(image, cv2.MORPH_CLOSE, kernel, iterations=2)
 
     def _convert_to_gray(self, image):
         return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    def _apply_dilation(self, image):
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        return cv2.dilate(image, kernel)
-
-    def _apply_blur(self, image):
-        return cv2.GaussianBlur(image, (3, 3), 0)
-
-    def _apply_erosion(self, image):
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        return cv2.erode(image, kernel, iterations=2)
 
     def _apply_canny_edge_detection(self, image):
         return cv2.Canny(image, 100, 200)
@@ -96,16 +87,16 @@ class PageExtractor:
         else:
             return original
 
-    def _approximate_contour(self, contour):
-        peri = cv2.arcLength(contour, True)
-        return cv2.approxPolyDP(contour, 0.032 * peri, True)
-
     def _get_receipt_contour(self, contours):
         for contour in contours:
             approx = self._approximate_contour(contour)
             if len(approx) == 4:
                 return approx
         return []
+
+    def _approximate_contour(self, contour):
+        peri = cv2.arcLength(contour, True)
+        return cv2.approxPolyDP(contour, 0.032 * peri, True)
 
     def _contour_to_rectangle(self, contour, resize_ratio):
         pts = contour.reshape(4, 2)
@@ -139,12 +130,16 @@ class PageExtractor:
         return cv2.warpPerspective(image, M, (max_width, max_height))
 
     def _apply_denoising(self, image):
-        return cv2.fastNlMeansDenoising(image, h=4)
+        return cv2.fastNlMeansDenoising(image, h=3)
+
+    def _apply_denoising_alternative(self, image):
+        return cv2.GaussianBlur(image, (5, 5), 0)
 
     def _binarize_image(self, image):
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if len(image.shape) == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         return cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+            image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
         )
 
     def get_image(self):

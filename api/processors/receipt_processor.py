@@ -1,219 +1,259 @@
-import spacy
 import re
 from datetime import datetime
+from keras_preprocessing.sequence import pad_sequences
+from keras.models import load_model
+import pickle
+import numpy as np
 
 
 class ReceiptProcessor:
     def __init__(self, model_path):
-        # Load the trained model from disk
-        self.nlp = spacy.load(model_path)
+        # Load the trained model
+        self.model = load_model(model_path + "picbudget_model.h5")
 
-    def process_text_line_by_line(self, text):
-        """
-        Process the given text line by line and extract named entities using spaCy.
+        # Load the tokenizers
+        with open(model_path + "tokenizer.pickle", "rb") as handle:
+            self.tokenizer = pickle.load(handle)
 
-        Args:
-            text (str): The input text to be processed.
+        with open(model_path + "label_tokenizer.pickle", "rb") as handle:
+            self.label_tokenizer = pickle.load(handle)
 
-        Returns:
-            list: A list of named entity tuples for each line in the text.
-                  Each tuple contains the named entity text and its label.
-        """
-        lines = text.splitlines()
-        results = []
-        for line in lines:
-            doc = self.nlp(line)
-            entities = [(ent.text, ent.label_) for ent in doc.ents]
-            results.append(entities)
-        return results
+        # Create a mapping from index to label
+        self.index_to_label = {v: k for k, v in self.label_tokenizer.word_index.items()}
+        self.index_to_label[0] = "O"  # Assuming 'O' is for non-entity tokens
 
-    def filter_item_prices(self, entities):
-        """
-        Filters out item prices from a list of entities.
-
-        Args:
-            entities (list): A list of tuples containing entities and their labels.
-
-        Returns:
-            list: A filtered list of tuples containing only the item prices.
-
-        """
-        filtered_entities = []
-        for entity, label in entities:
-            if label == "ITEM_PRICE":
-                # Check if the entity is a number and ends with '00' or '000'
-                if re.match(r"^\d+(00|000)$", entity):
-                    filtered_entities.append((entity, label))
-            else:
-                filtered_entities.append((entity, label))
-        return filtered_entities
-
-    def filter_item_names(self, entities):
-        """
-        Filters out unwanted item names from the given list of entities.
-
-        Args:
-            entities (list): A list of tuples containing entity-label pairs.
-
-        Returns:
-            list: A filtered list of tuples containing entity-label pairs, excluding unwanted item names.
-
-        """
-        filtered_entities = []
-        exclude_keywords = {
-            "total",
-            "cash",
-            "bayar",
-            "kembali",
-            "terima",
-            "kasih",
-            "jual",
-            "harga",
-            "beli",
-            "uang",
-            "kembalian",
-            "tunai",
-            "pulsa",
-            "saldo",
-            "voucher",
-            "pembayaran",
-            "pembelian",
-            "belanja",
-            "change",
-        }
-        quantity_pattern = re.compile(r"^\d+x$", re.IGNORECASE)
-        for entity, label in entities:
-            if label == "ITEM_NAME":
-                if not any(
-                    keyword in entity.lower() for keyword in exclude_keywords
-                ) and not quantity_pattern.match(entity):
-                    filtered_entities.append((entity, label))
-            else:
-                filtered_entities.append((entity, label))
-        return filtered_entities
+        # Compile regex patterns once
+        self.date_pattern = re.compile(
+            r"\b(\d{1,2}[-/\s]\d{1,2}[-/\s]\d{2,4}|\d{4}[-/\s]\d{1,2}[-/\s]\d{1,2}|\d{1,2}\s+\w+\s+\d{4})\b"
+        )
+        self.qty_pattern = re.compile(r"^\d+X$")
+        self.formats = [
+            "%Y-%m-%d",
+            "%d/%m/%Y",
+            "%d %B %Y",
+            "%m-%d-%Y",
+            "%d %b %Y",
+            "%Y.%m.%d",
+            "%d-%m-%Y",
+            "%m/%d/%Y",
+            "%d %b %Y",
+            "%Y.%m.%d",
+            "%d-%m-%y",
+            "%d/%m/%y",
+            "%d.%m.%y",
+        ]
 
     def get_total_entities(self, text):
-        """
-        Retrieves the total number of entities from the given text.
-
-        Args:
-            text (str): The input text.
-
-        Returns:
-            int: The total number of entities found in the text.
-        """
         tokens = text.split(" ")
         total = 0
         is_total = False
-        for line in tokens:
-            if "total" in line:
+        for token in tokens:
+            if "TOTAL" in token:
                 is_total = True
             if is_total:
                 try:
-                    total = int(line)
+                    total = int(token)
                     break
-                except Exception as e:
-                    print(e)
+                except ValueError:
                     continue
         return total
 
-    def get_date_entities(self, text):
-        """
-        Extracts the date entities from the given text.
+    def correct_price_label(self, word, label):
+        if "PRICE" in label:
+            if not word.endswith("00"):
+                return "O"
+            try:
+                float(word)
+            except ValueError:
+                return "O"
+        return label
 
-        Args:
-            text (str): The input text.
+    def correct_item_name_label(self, word, label):
+        if "ITEM_NAME" in label:
+            if word in [
+                "PCS",
+                "TOTAL",
+                "PPN",
+                "KEMBALI",
+                "NO",
+                "KM",
+                "PEMBAYARAN",
+                "HARGA",
+            ]:
+                return "O"
+            try:
+                float(word)
+                if not word.endswith("00"):
+                    return "O"
+                else:
+                    return "PRICE"
+            except ValueError:
+                if word[0].isdigit():
+                    return "O"
+        return label
 
-        Returns:
-            str: The extracted date entity.
+    def correct_qty_label(self, word, label):
+        if re.match(self.qty_pattern, word):
+            return "O"
+        return label
 
-        """
-        tokens = text.split(" ")
-        date = None
-        for line in tokens:
-            dates = re.findall(r"\b\d{2}[./-]\d{2}[./-]\d{2,4}\b", line)
-            if dates:
-                date = dates[0]
-                break
-        if date is None:
-            date = datetime.now().strftime("%d/%m/%Y")
-        return date
+    def correct_labels(self, line, labels):
+        for j, (word, label) in enumerate(zip(line, labels)):
+            label = self.correct_price_label(word, label)
+            label = self.correct_item_name_label(word, label)
+            label = self.correct_qty_label(word, label)
+            labels[j] = label
+        return labels
 
-    def find_item_name_price_pattern(self, filtered_line_ner_results):
-        """
-        Finds and returns a list of items with their corresponding prices from the given filtered line NER results.
+    def correct_address_labels(self, line, labels):
+        if "ITEM_NAME" in labels and any(
+            word in ["JL", "JALAN", "J1"] for word in line
+        ):
+            labels = ["ADDRESS"] * len(line)
+        if "ADDRESS" in labels and any(word in ["KEC", "KAB"] for word in line):
+            labels = ["O"] * len(line)
+        if "ITEM_NAME" in labels and any(word in ["KEC", "KAB"] for word in line):
+            labels = ["O"] * len(line)
+        if "ADDRESS" in labels:
+            labels = ["ADDRESS"] * len(line)
+        return labels
 
-        Args:
-            filtered_line_ner_results (list): A list of filtered line NER results, where each result is a list of (entity, label) tuples.
+    def correct_date_labels(self, line, labels):
+        if "DATE" in labels:
+            labels = ["DATE"] * len(line)
+        return labels
 
-        Returns:
-            list: A list of dictionaries, where each dictionary represents an item with its name and price. The dictionary has the following structure:
-                {
-                    "item": str,  # The name of the item
-                    "price": int  # The price of the item
-                }
-        """
-        items = []
-        for i in range(len(filtered_line_ner_results)):
-            filtered_entities = filtered_line_ner_results[i]
-            item_name = None
-            item_price = None
-            for entity, label in filtered_entities:
-                if label == "ITEM_NAME":
-                    item_name = entity
-                elif label == "ITEM_PRICE":
-                    item_price = entity
-            if item_name and item_price:
-                items.append({"item": item_name, "price": int(item_price)})
-            elif (
-                item_name and not item_price and i + 1 < len(filtered_line_ner_results)
-            ):
-                next_line_entities = filtered_line_ner_results[i + 1]
-                for entity, label in next_line_entities:
-                    if label == "ITEM_PRICE":
-                        item_price = entity
-                        items.append({"item": item_name, "price": int(item_price)})
-                        break
-        return items
+    def extract_date(self, line):
+        match = self.date_pattern.search(" ".join(line))
+        if match:
+            date_str = match.group(0)
+            for date_format in self.formats:
+                try:
+                    date_obj = datetime.strptime(date_str, date_format)
+                    if (
+                        date_format in ["%d-%m-%y", "%d/%m/%y", "%d.%m.%y"]
+                        and date_obj.year < 100
+                    ):
+                        current_year = datetime.now().year
+                        current_century = current_year // 100 * 100
+                        date_obj = date_obj.replace(
+                            year=current_century + date_obj.year
+                        )
+                    return date_obj.strftime("%d/%m/%Y")
+                except ValueError:
+                    continue
+        return datetime.now().strftime("%d/%m/%Y")
 
-    def process_receipt(self, text):
-        """
-        Process the receipt text and extract relevant information such as total, date, address, and items.
+    def extract_items(self, text_lines, label_lines, i, items):
+        line = text_lines[i].split()
+        labels = label_lines[i]
+        item_name = " ".join(
+            word for word, label in zip(line, labels) if label == "ITEM_NAME"
+        )
+        prices = []
 
-        Args:
-            text (str): The receipt text to be processed.
+        # Extract prices from the current line
+        for word, label in zip(line, labels):
+            if label == "PRICE":
+                try:
+                    prices.append(int(word))
+                except ValueError:
+                    continue
 
-        Returns:
-            dict: A dictionary containing the extracted information from the receipt.
-                The dictionary has the following keys:
-                - "total": The total amount on the receipt.
-                - "date": The date mentioned on the receipt.
-                - "address": The address mentioned on the receipt.
-                - "items": A list of items and their corresponding prices mentioned on the receipt.
-        """
-        line_ner_results = self.process_text_line_by_line(text)
-        inline_text = text.split("\n")
+        price = prices[-1] if prices else None
 
-        for i in range(len(line_ner_results)):
-            filtered_entities = self.filter_item_prices(line_ner_results[i])
-            filtered_entities = self.filter_item_names(filtered_entities)
-            line_ner_results[i] = filtered_entities
+        # If no price found in the current line, check the next immediate line
+        if price is None and i + 1 < len(text_lines):
+            next_line = text_lines[i + 1].split()
+            next_labels = label_lines[i + 1]
+            next_prices = []
 
-        total = self.get_total_entities(" ".join(inline_text))
-        date = self.get_date_entities(" ".join(inline_text))
+            for word, label in zip(next_line, next_labels):
+                if label == "PRICE":
+                    try:
+                        next_prices.append(int(word))
+                    except ValueError:
+                        continue
 
-        try:
-            address = [
-                address
-                for address in line_ner_results
-                if any("ADDRESS" in label for _, label in address)
+            price = next_prices[-1] if next_prices else None
+
+        # Only append if both item_name and price are found
+        if item_name and price is not None:
+            items.append({"item": item_name, "price": int(price)})
+
+    def should_skip_line(self, labels):
+        return labels.count("O") > len(labels) / 2
+
+    def correct_item_name_labels(self, labels):
+        if "ITEM_NAME" in labels and "PRICE" in labels:
+            labels = ["ITEM_NAME" if label == "O" else label for label in labels]
+        return labels
+
+    def extract_address(self, line_words, labels, current_address):
+        if not current_address and "ADDRESS" in labels:
+            return " ".join(line_words)
+        return current_address
+
+    def process_receipt(self, new_text):
+        new_text = new_text.upper()
+        # Clean and prepare text
+        new_text_cleaned = new_text.replace("\n", " ")
+        new_sequences = self.tokenizer.texts_to_sequences([new_text_cleaned])
+        padded_new_sequences = pad_sequences(new_sequences, maxlen=150, padding="post")
+
+        # Predict labels
+        new_predictions = self.model.predict(padded_new_sequences)
+
+        # Convert predictions to label indices
+        predicted_labels_indices = np.argmax(new_predictions, axis=-1)
+
+        # Map predicted indices to labels
+        predicted_labels = [
+            [self.index_to_label.get(label, "O") for label in sentence]
+            for sentence in predicted_labels_indices
+        ]
+
+        # Combine text lines with their labels
+        new_text_lines = new_text.strip().split("\n")
+        token_index = 0
+
+        text_line = []
+        label_line = []
+
+        for line in new_text_lines:
+            line_tokens = line.split()
+            line_labels = predicted_labels[0][
+                token_index : token_index + len(line_tokens)
             ]
-            address = address[0][0][0]
-        except Exception as e:
-            print(e)
-            address = None
+            token_index += len(line_tokens)
+            text_line.append(line)
+            label_line.append(line_labels)
 
-        items = self.find_item_name_price_pattern(line_ner_results)
+        total = self.get_total_entities(new_text_cleaned)
+        address = None
+        date = None
+        items = []
 
-        result = {"total": total, "date": date, "address": address, "items": items}
-        return result
+        clean_text_line = []
+        clean_label_line = []
+        for i, (line, labels) in enumerate(zip(text_line, label_line)):
+            line_words = line.split()
+            labels = self.correct_labels(line_words, labels)
+            labels = self.correct_address_labels(line_words, labels)
+            labels = self.correct_date_labels(line_words, labels)
+
+            if self.should_skip_line(labels):
+                continue
+
+            labels = self.correct_item_name_labels(labels)
+            clean_label_line.append(labels)
+            clean_text_line.append(line)
+
+            address = self.extract_address(line_words, labels, address)
+            date = date or self.extract_date(line_words)
+
+        for i, (line, labels) in enumerate(zip(clean_text_line, clean_label_line)):
+            if "ITEM_NAME" in labels:
+                self.extract_items(clean_text_line, clean_label_line, i, items)
+
+        return {"total": total, "date": date, "address": address, "items": items}

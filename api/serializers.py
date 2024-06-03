@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from .models import User, Wallet, Transaction, TransactionItem
 from django.contrib.auth.password_validation import validate_password
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -14,10 +15,37 @@ class UserSerializer(serializers.ModelSerializer):
         return user
 
 
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def validate(self, attrs):
+        data = super().validate(attrs)
+
+        # Add custom user data to the response
+        user = self.user
+        user_data = {
+            "user_id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "dob": user.dob,
+            "gender": user.gender,
+            "phone_number": user.phone_number,
+        }
+
+        # Wrap user data inside a "data" key
+        data["data"] = user_data
+
+        return data
+
+
 class WalletSerializer(serializers.ModelSerializer):
     class Meta:
         model = Wallet
-        fields = ["id", "user", "wallet_name", "balance"]
+        fields = ["id", "wallet_name", "balance"]
+
+
+class TransactionItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TransactionItem
+        fields = ["id", "transaction", "item_name", "item_price"]
 
 
 class TransactionItemSerializer(serializers.ModelSerializer):
@@ -28,10 +56,29 @@ class TransactionItemSerializer(serializers.ModelSerializer):
 
 class TransactionSerializer(serializers.ModelSerializer):
     items = TransactionItemSerializer(many=True)
+    receipt_image = serializers.SerializerMethodField()
+    formatted_date = serializers.SerializerMethodField()
 
     class Meta:
         model = Transaction
-        fields = ["id", "wallet", "amount", "location", "date", "ocr_data", "items"]
+        fields = [
+            "id",
+            "wallet",
+            "receipt_image",
+            "amount",
+            "location",
+            "formatted_date",
+            "items",
+        ]
+
+    def get_receipt_image(self, obj):
+        request = self.context.get("request")
+        if request is not None:
+            return request.build_absolute_uri(obj.receipt_image.url)
+        return obj.receipt_image.url
+
+    def get_formatted_date(self, obj):
+        return obj.date.strftime("%d/%m/%Y")
 
     def create(self, validated_data):
         items_data = validated_data.pop("items")
